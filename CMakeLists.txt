@@ -8,7 +8,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 if(MSVC)
     add_compile_options(/arch:AVX2 /O2)
 else()
-    add_compile_options(-mavx2 -O3 -Wall -Wextra)
+    add_compile_options(-mavx2 -mfma -O3 -Wall -Wextra)
 endif()
 
 include_directories(include)
