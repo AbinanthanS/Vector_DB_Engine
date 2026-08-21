@@ -55,6 +55,46 @@ On Windows with a multi-config generator, use the Release output directory:
 Each run creates `benchmark_engine.db` in the working directory and removes an
 existing file with that name before loading the synthetic dataset.
 
+## Docker
+
+Docker is optional. Use it when you want to run the benchmark in the pinned
+Ubuntu 24.04 environment defined by the `Dockerfile`.
+
+Build the image from the project root:
+
+```bash
+docker build -t vectordb .
+```
+
+Run the default benchmark:
+
+```bash
+docker run --rm vectordb
+```
+
+Run the 500,000-vector workload:
+
+```bash
+docker run --rm vectordb --large
+```
+
+The container writes `benchmark_engine.db` under `/app/data`. Mount a local
+directory when you want to keep that file after the container exits:
+
+```bash
+docker run --rm -v "${PWD}/data:/app/data" vectordb
+```
+
+The image builds the benchmark without tests by default. To include the test
+binary, build with `BUILD_TESTS=ON`; GoogleTest is fetched during this build:
+
+```bash
+docker build --build-arg BUILD_TESTS=ON -t vectordb-tests .
+```
+
+The image enables AVX2/FMA during compilation and therefore requires a
+compatible CPU at runtime.
+
 ## Benchmark
 
 The benchmark uses deterministic random data (`mt19937`, seed `1337`) with
