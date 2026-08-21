@@ -17,3 +17,9 @@ include_directories(include)
 file(GLOB_RECURSE SOURCES "src/*.cpp")
 
 add_executable(vectordb main.cpp ${SOURCES})
+
+# On MinGW, static-link the runtime so vectordb.exe doesn't depend on
+# libstdc++-6.dll / libgcc_s_seh-1.dll / libwinpthread-1.dll being on PATH.
+if(MINGW)
+    target_link_options(vectordb PRIVATE -static -static-libgcc -static-libstdc++)
+endif()
