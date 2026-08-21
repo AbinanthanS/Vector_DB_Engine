@@ -1,40 +1,119 @@
 # Vector DB Engine
 
-A compact C++ vector database engine built from scratch with:
+A compact C++20 vector database engine built from scratch for storage, indexing,
+and approximate nearest-neighbor search experiments. The current implementation
+includes:
 
-- a custom slotted-page storage layer
-- a B+ tree for category-based filtering
-- an HNSW graph for ANN/vector search
-- AVX2/FMA cosine-distance acceleration
-- an exact hybrid query path using the B+ tree posting list
+- slotted pages backed by a buffer pool
+- a B+ tree for category posting lists
+- an HNSW graph for approximate nearest-neighbor search
+- scalar and AVX2/FMA cosine-distance implementations
+- an exact filtered top-k query path over B+ tree candidates
+
+## Requirements
+
+- CMake 3.20 or newer
+- a C++20 compiler
+- AVX2/FMA support at runtime for the SIMD distance benchmark
+- Internet access on the first configure when tests need to fetch GoogleTest
+
+The CMake configuration enables `/arch:AVX2` on MSVC and `-mavx2 -mfma -O3`
+on other compilers. Run the SIMD benchmark only on a machine that supports
+those instructions.
 
 ## Build
 
 ```bash
 cmake -S . -B build
-cmake --build build
+cmake --build build --config Release
 ```
 
-## Run benchmark
+To build without the GoogleTest suite:
+
+```bash
+cmake -S . -B build -DBUILD_TESTS=OFF
+cmake --build build --config Release
+```
+
+## Run
+
+The executable runs the default 100,000-vector benchmark. The `--large` option
+uses 500,000 vectors.
 
 ```bash
 ./build/vectordb
 ./build/vectordb --large
 ```
 
-## Test
+On Windows with a multi-config generator, use the Release output directory:
+
+```powershell
+.\build\Release\vectordb.exe
+.\build\Release\vectordb.exe --large
+```
+
+Each run creates `benchmark_engine.db` in the working directory and removes an
+existing file with that name before loading the synthetic dataset.
+
+## Benchmark
+
+The benchmark uses deterministic random data (`mt19937`, seed `1337`) with
+128-dimensional FP32 vectors, `K=10`, 100 timed queries, and five evenly
+distributed categories. It reports:
+
+1. scalar versus AVX2/FMA cosine distance over 500,000 iterations
+2. storage and index ingestion throughput
+3. exact filtered top-k latency, including average, p50, p95, and p99
+4. the missing-category fast path, reported separately from retrieval latency
+
+### Baseline Result
+
+Measured on the current workspace build using the default workload. Results are
+machine-dependent and should be treated as a reference, not a performance
+guarantee.
+
+| Metric | Result |
+| --- | ---: |
+| Dataset | 100,000 vectors x 128D FP32 |
+| Scalar cosine | 74.9413 ms / 500,000 ops |
+| AVX2/FMA cosine | 16.2498 ms / 500,000 ops |
+| SIMD speedup | 4.61x |
+| SIMD throughput | 30.7696 M distance ops/sec |
+| Ingestion throughput | 118,795 records/sec |
+| Filtered top-k average | 8.7067 ms |
+| Filtered top-k p50 | 8.0771 ms |
+| Filtered top-k p95 | 14.6883 ms |
+| Filtered top-k p99 | 15.3577 ms |
+| Filtered results/query | 10 |
+| Empty-category average | 0.0014 ms |
+
+The filtered search is exact over the B+ tree candidate set. Top-k selection
+uses a bounded heap rather than sorting every candidate. The benchmark does
+not measure concurrent clients, durability under failure, recall against an
+exact unfiltered ground truth, or a production-scale workload.
+
+## Tests
 
 ```bash
 ctest --test-dir build --output-on-failure
 ```
 
-## Notes
+The test suite covers slotted-page operations, buffer-pool allocation and
+flushing, B+ tree lookups and splits, distance calculations, HNSW search, and
+query-engine filtering.
 
-The benchmark binary performs a realistic end-to-end workload:
+## Project Layout
 
-- building a synthetic dataset
-- ingesting vectors into the storage engine
-- exact filtered top-k lookup using the B+ tree candidate set
-- empty-filter fast-path benchmarking
+```text
+include/       Public headers grouped by subsystem
+src/           Storage, index, distance, and query implementations
+tests/         GoogleTest unit tests
+main.cpp       Synthetic benchmark executable
+index/         Index-related headers retained for the project layout
+math/          Distance-related headers retained for the project layout
+query/         Query-engine headers retained for the project layout
+storage/       Storage headers retained for the project layout
+```
 
-This project is designed for experimentation and performance profiling rather than production deployment.
+This project is intended for experimentation and performance profiling rather
+than production deployment.
