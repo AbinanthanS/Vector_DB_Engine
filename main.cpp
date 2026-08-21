@@ -1,38 +1,37 @@
 #include <iostream>
 #include <vector>
 #include "storage/buffer_pool.h"
-#include "index/hnsw.h"
+#include "query/engine.h"
 
 int main() {
-    const std::string db_file = "hnsw_test.db";
+    const std::string db_file = "engine_hybrid_test.db";
     storage::BufferPoolManager bpm(db_file, 10);
 
     constexpr size_t DIM = 128;
-    index::HNSWIndex hnsw(bpm, DIM);
+    query::ExecutionEngine engine(bpm, DIM);
 
-    // Insert 3 target vectors
-    std::vector<float> vec0(DIM, 0.1f); // Node 0
-    std::vector<float> vec1(DIM, 0.5f); // Node 1 (Closest to query)
-    std::vector<float> vec2(DIM, 0.9f); // Node 2
+    // Setup 3 vectors across 2 distinct categories (Category 10 = 'Tech', Category 20 = 'Finance')
+    std::vector<float> vec0(DIM, 0.1f); // Tech
+    std::vector<float> vec1(DIM, 0.5f); // Finance (Closest vector match!)
+    std::vector<float> vec2(DIM, 0.9f); // Tech
 
-    index::RecordID rid0{1, 0};
-    index::RecordID rid1{1, 1};
-    index::RecordID rid2{1, 2};
+    engine.insert_record(0, 10, vec0); // ID: 0, Category: 10
+    engine.insert_record(1, 20, vec1); // ID: 1, Category: 20
+    engine.insert_record(2, 10, vec2); // ID: 2, Category: 10
 
-    hnsw.insert(0, vec0, rid0);
-    hnsw.insert(1, vec1, rid1);
-    hnsw.insert(2, vec2, rid2);
+    std::cout << "[Execution Engine] Inserted records across scalar categories 10 (Tech) & 20 (Finance)." << std::endl;
 
-    std::cout << "[HNSW] Inserted 3 vectors (128-dim) into spatial graph." << std::endl;
-
-    // Search query vector closest to vec1 (0.5f)
+    // Search query vector (0.52f) with a strict scalar category pre-filter = 10 ('Tech')
+    // Note: vec1 (0.5f) is closest in distance, but SHOULD BE PRUNED because its category is 20!
     std::vector<float> query_vec(DIM, 0.52f);
-    auto results = hnsw.search(query_vec, 2); // Retrieve Top-2 nearest neighbors
+    uint32_t filter_category = 10;
 
-    std::cout << "[HNSW Search] Top-2 Nearest Neighbors for Query:" << std::endl;
+    std::cout << "\n[Hybrid Query] Executing Search for Query Vector (0.52f) WHERE Category == 10..." << std::endl;
+    auto results = engine.hybrid_query(filter_category, query_vec, 2);
+
     for (size_t i = 0; i < results.size(); ++i) {
-        std::cout << " Rank " << i + 1 << " -> Cosine Distance: " << results[i].first
-                  << " | Page ID: " << results[i].second.page_id 
+        std::cout << " Result Rank " << i + 1 << " -> Cosine Distance: " << results[i].first
+                  << " | Physical Page ID: " << results[i].second.page_id 
                   << ", Slot ID: " << results[i].second.slot_id << std::endl;
     }
 
