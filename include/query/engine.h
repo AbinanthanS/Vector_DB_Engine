@@ -3,6 +3,7 @@
 
 #include <vector>
 #include <utility>
+#include <limits>
 #include "storage/buffer_pool.h"
 #include "index/btree.h"
 #include "index/hnsw.h"
@@ -20,10 +21,10 @@ public:
     ExecutionEngine(storage::BufferPoolManager& bpm, size_t dim);
 
     // Insert record atomically into storage, B+ Tree index, and HNSW graph
-    index::RecordID insert_record(uint32_t id, uint32_t category, const std::vector<float>& vec);
+    vdb_index::RecordID insert_record(uint32_t id, uint32_t category, const std::vector<float>& vec);
 
     // Execute single-stage hybrid search (Filter scalar category AND retrieve Top-K vectors)
-    std::vector<std::pair<float, index::RecordID>> hybrid_query(
+    std::vector<std::pair<float, vdb_index::RecordID>> hybrid_query(
         uint32_t filter_category, 
         const std::vector<float>& query_vec, 
         size_t k
@@ -32,11 +33,12 @@ public:
 private:
     storage::BufferPoolManager& bpm_;
     size_t dim_;
-    index::BTreeIndex btree_;
-    index::HNSWIndex hnsw_;
+    vdb_index::BTreeIndex btree_;
+    vdb_index::HNSWIndex hnsw_;
     
     // Tracks category mapping per inserted node for single-stage evaluation
-    std::unordered_map<uint32_t, uint32_t> node_category_map_; 
+    std::unordered_map<uint32_t, uint32_t> node_category_map_;
+    uint32_t current_vector_page_id_ = 0xFFFFFFFF; 
 };
 
 } // namespace query

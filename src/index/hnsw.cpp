@@ -3,10 +3,14 @@
 #include <algorithm>
 #include <iostream>
 
-namespace index {
+namespace vdb_index {
 
 HNSWIndex::HNSWIndex(storage::BufferPoolManager& bpm, size_t dim, size_t ef_construction)
     : bpm_(bpm), dim_(dim), ef_construction_(ef_construction), entry_node_id_(0xFFFFFFFF), max_level_(-1), rng_(42) {}
+
+uint64_t HNSWIndex::rid_key(RecordID rid) {
+    return (static_cast<uint64_t>(rid.page_id) << 16) | rid.slot_id;
+}
 
 int HNSWIndex::generate_random_level() {
     std::uniform_real_distribution<double> dist(0.0, 1.0);
@@ -17,12 +21,16 @@ int HNSWIndex::generate_random_level() {
 }
 
 float HNSWIndex::get_distance(const std::vector<float>& a, uint32_t node_b_id) {
-    const auto& vec_b = vector_cache_[node_b_id];
-    return math::calculate_cosine_distance(a.data(), vec_b.data(), dim_);
+    const float* vec_b = vector_cache_.data() + static_cast<size_t>(node_b_id) * dim_;
+    return math::calculate_cosine_distance(a.data(), vec_b, dim_);
 }
 
 void HNSWIndex::insert(uint32_t node_id, const std::vector<float>& vec, RecordID rid) {
-    vector_cache_[node_id] = vec;
+    const size_t required = (static_cast<size_t>(node_id) + 1) * dim_;
+    if (vector_cache_.size() < required) vector_cache_.resize(required);
+    std::copy(vec.begin(), vec.end(),
+              vector_cache_.begin() + static_cast<size_t>(node_id) * dim_);
+    rid_to_node_[rid_key(rid)] = node_id;
 
     HNSWNodePayload new_node{};
     new_node.node_id = node_id;
@@ -132,4 +140,53 @@ std::vector<std::pair<float, RecordID>> HNSWIndex::search(const std::vector<floa
     return results;
 }
 
-} // namespace index
+
+std::vector<std::pair<float, RecordID>> HNSWIndex::search_filtered(
+    const std::vector<float>& query_vec,
+    const std::vector<RecordID>& valid_rids,
+    size_t k
+) {
+    if (k == 0 || valid_rids.empty()) return {};
+
+    // Keep only the best k distances. This avoids sorting the entire
+    // filtered candidate set.
+    struct Candidate {
+        float distance;
+        RecordID rid;
+    };
+    struct WorseFirst {
+        bool operator()(const Candidate& a, const Candidate& b) const {
+            return a.distance < b.distance; // max-heap: worst distance at top
+        }
+    };
+
+    std::priority_queue<Candidate, std::vector<Candidate>, WorseFirst> topk;
+
+    for (const RecordID& rid : valid_rids) {
+        auto it = rid_to_node_.find(rid_key(rid));
+        if (it == rid_to_node_.end()) continue;
+
+        uint32_t node_id = it->second;
+        float d = get_distance(query_vec, node_id);
+
+        if (topk.size() < k) {
+            topk.push({d, rid});
+        } else if (d < topk.top().distance) {
+            topk.pop();
+            topk.push({d, rid});
+        }
+    }
+
+    std::vector<std::pair<float, RecordID>> results;
+    results.reserve(topk.size());
+    while (!topk.empty()) {
+        results.push_back({topk.top().distance, topk.top().rid});
+        topk.pop();
+    }
+    std::sort(results.begin(), results.end(),
+              [](const auto& x, const auto& y) { return x.first < y.first; });
+    return results;
+}
+
+
+} // namespace vdb_index

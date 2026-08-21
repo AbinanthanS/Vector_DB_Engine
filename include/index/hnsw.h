@@ -11,7 +11,7 @@
 #include "math/distance.h"
 #include "index/btree.h"
 
-namespace index {
+namespace vdb_index {
 
 constexpr size_t MAX_NEIGHBORS = 16;
 constexpr size_t MAX_LAYERS = 4;
@@ -32,6 +32,13 @@ public:
 
     // Search for Top-K Nearest Neighbors
     std::vector<std::pair<float, RecordID>> search(const std::vector<float>& query_vec, size_t k);
+    // Exact Top-K over a pre-filtered RecordID posting list. This is the
+    // correctness-preserving hybrid-search path.
+    std::vector<std::pair<float, RecordID>> search_filtered(
+        const std::vector<float>& query_vec,
+        const std::vector<RecordID>& valid_rids,
+        size_t k
+    );
 
 private:
     storage::BufferPoolManager& bpm_;
@@ -41,13 +48,15 @@ private:
     int max_level_;
 
     std::mt19937 rng_;
-    std::unordered_map<uint32_t, std::vector<float>> vector_cache_;
+    std::vector<float> vector_cache_; // contiguous FP32 storage: node_id * dim_
     std::unordered_map<uint32_t, HNSWNodePayload> node_cache_;
+    std::unordered_map<uint64_t, uint32_t> rid_to_node_;
 
     int generate_random_level();
     float get_distance(const std::vector<float>& a, uint32_t node_b_id);
+    static uint64_t rid_key(RecordID rid);
 };
 
-} // namespace index
+} // namespace vdb_index
 
 #endif // HNSW_H

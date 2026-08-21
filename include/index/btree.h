@@ -5,7 +5,7 @@
 #include <vector>
 #include "storage/buffer_pool.h"
 
-namespace index {
+namespace vdb_index {
 
 // Physical location pointer of a record inside the DB engine
 struct RecordID {
@@ -17,7 +17,7 @@ struct RecordID {
     }
 };
 
-constexpr size_t MAX_BTREE_KEYS = 3; // Kept small for testing node splits
+constexpr size_t MAX_BTREE_KEYS = 63; // Fits comfortably in a 4KB page and reduces tree height
 
 struct BTreeNodePayload {
     bool is_leaf;
@@ -54,6 +54,6 @@ private:
     void split_child(uint32_t parent_page_id, int child_idx, uint32_t child_page_id);
 };
 
-} // namespace index
+} // namespace vdb_index
 
 #endif // BTREE_H

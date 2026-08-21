@@ -2,7 +2,7 @@
 #include <cstring>
 #include <iostream>
 
-namespace index {
+namespace vdb_index {
 
 BTreeIndex::BTreeIndex(storage::BufferPoolManager& bpm) : bpm_(bpm) {
     // Allocate root node on a fresh 4KB page
@@ -22,31 +22,45 @@ BTreeIndex::BTreeIndex(storage::BufferPoolManager& bpm) : bpm_(bpm) {
 bool BTreeIndex::search(uint32_t key, std::vector<RecordID>& out_rids) {
     uint32_t current_page_id = root_page_id_;
 
+    // Descend to the first leaf that can contain the key.
     while (true) {
         storage::SlottedPage* page = bpm_.fetch_page(current_page_id);
         std::vector<uint8_t> buffer;
-        page->get_record(0, buffer);
+        if (!page->get_record(0, buffer)) return false;
 
-        const BTreeNodePayload* node = reinterpret_cast<const BTreeNodePayload*>(buffer.data());
+        BTreeNodePayload node{};
+        std::memcpy(&node, buffer.data(), sizeof(BTreeNodePayload));
 
-        if (node->is_leaf) {
-            for (uint16_t i = 0; i < node->num_keys; ++i) {
-                if (node->keys[i] == key) {
-                    out_rids.push_back(node->record_ids[i]);
-                    return true;
-                }
-            }
-            return false; // Key not found in leaf
-        }
+        if (node.is_leaf) break;
 
-        // Navigate internal node pointers
-        int i = node->num_keys - 1;
-        while (i >= 0 && key < node->keys[i]) {
-            i--;
-        }
-        i++;
-        current_page_id = node->child_page_ids[i];
+        int i = node.num_keys - 1;
+        while (i >= 0 && key <= node.keys[i]) --i;
+        current_page_id = node.child_page_ids[i + 1];
     }
+
+    // B+ tree leaves are linked, so collect ALL duplicate-key records.
+    bool found = false;
+    while (current_page_id != 0xFFFFFFFF) {
+        storage::SlottedPage* page = bpm_.fetch_page(current_page_id);
+        std::vector<uint8_t> buffer;
+        if (!page->get_record(0, buffer)) break;
+
+        BTreeNodePayload node{};
+        std::memcpy(&node, buffer.data(), sizeof(BTreeNodePayload));
+
+        for (uint16_t i = 0; i < node.num_keys; ++i) {
+            if (node.keys[i] == key) {
+                out_rids.push_back(node.record_ids[i]);
+                found = true;
+            } else if (node.keys[i] > key) {
+                return found;
+            }
+        }
+
+        current_page_id = node.next_leaf_page_id;
+    }
+
+    return found;
 }
 
 void BTreeIndex::insert(uint32_t key, RecordID rid) {
@@ -84,45 +98,61 @@ void BTreeIndex::split_child(uint32_t parent_page_id, int child_idx, uint32_t ch
     storage::SlottedPage* child_page = bpm_.fetch_page(child_page_id);
     std::vector<uint8_t> child_buf;
     child_page->get_record(0, child_buf);
-    BTreeNodePayload y;
+    BTreeNodePayload y{};
     std::memcpy(&y, child_buf.data(), sizeof(BTreeNodePayload));
 
     BTreeNodePayload z{};
     z.is_leaf = y.is_leaf;
-    z.num_keys = 1; // Splitting 3 keys into 1 each
 
-    z.keys[0] = y.keys[2];
-    z.record_ids[0] = y.record_ids[2];
+    constexpr size_t mid = MAX_BTREE_KEYS / 2;
+    uint32_t promoted_key = 0;
 
-    if (!y.is_leaf) {
-        z.child_page_ids[0] = y.child_page_ids[2];
-        z.child_page_ids[1] = y.child_page_ids[3];
-    } else {
+    if (y.is_leaf) {
+        // Keep the separator record in the right leaf (B+ tree semantics).
+        z.num_keys = static_cast<uint16_t>(MAX_BTREE_KEYS - mid);
+        for (size_t j = 0; j < z.num_keys; ++j) {
+            z.keys[j] = y.keys[mid + j];
+            z.record_ids[j] = y.record_ids[mid + j];
+        }
+
         z.next_leaf_page_id = y.next_leaf_page_id;
         y.next_leaf_page_id = z_page_id;
+        y.num_keys = static_cast<uint16_t>(mid);
+
+        promoted_key = z.keys[0];
+    } else {
+        // Internal-node split: promote the median; it is not retained
+        // in either child.
+        promoted_key = y.keys[mid];
+        z.num_keys = static_cast<uint16_t>(MAX_BTREE_KEYS - mid - 1);
+
+        for (size_t j = 0; j < z.num_keys; ++j) {
+            z.keys[j] = y.keys[mid + 1 + j];
+        }
+        for (size_t j = 0; j <= z.num_keys; ++j) {
+            z.child_page_ids[j] = y.child_page_ids[mid + 1 + j];
+        }
+
+        y.num_keys = static_cast<uint16_t>(mid);
     }
 
-    y.num_keys = 1;
-
-    // Update parent node
     storage::SlottedPage* parent_page = bpm_.fetch_page(parent_page_id);
     std::vector<uint8_t> parent_buf;
     parent_page->get_record(0, parent_buf);
-    BTreeNodePayload p;
+    BTreeNodePayload p{};
     std::memcpy(&p, parent_buf.data(), sizeof(BTreeNodePayload));
 
-    for (int j = p.num_keys; j > child_idx; j--) {
+    for (int j = static_cast<int>(p.num_keys); j > child_idx; --j) {
         p.child_page_ids[j + 1] = p.child_page_ids[j];
     }
     p.child_page_ids[child_idx + 1] = z_page_id;
 
-    for (int j = p.num_keys - 1; j >= child_idx; j--) {
+    for (int j = static_cast<int>(p.num_keys) - 1; j >= child_idx; --j) {
         p.keys[j + 1] = p.keys[j];
     }
-    p.keys[child_idx] = y.keys[1]; // Median key promoted to parent
-    p.num_keys++;
+    p.keys[child_idx] = promoted_key;
+    ++p.num_keys;
 
-    // Write back updated nodes to disk
     storage::SlottedPage new_p_page;
     new_p_page.insert_record(reinterpret_cast<const uint8_t*>(&p), sizeof(BTreeNodePayload));
     std::memcpy(parent_page->raw_data(), new_p_page.raw_data(), storage::PAGE_SIZE);
@@ -190,4 +220,4 @@ void BTreeIndex::insert_non_full(uint32_t node_page_id, uint32_t key, RecordID r
     }
 }
 
-} // namespace index
+} // namespace vdb_index

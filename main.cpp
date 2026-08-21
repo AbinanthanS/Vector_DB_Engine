@@ -1,90 +1,225 @@
-#include <iostream>
-#include <vector>
-#include <chrono>
-#include <random>
-#include <numeric>
 #include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <filesystem>
+#include <iomanip>
+#include <iostream>
+#include <numeric>
+#include <random>
+#include <string>
+#include <vector>
+
 #include "storage/buffer_pool.h"
 #include "query/engine.h"
 #include "math/distance.h"
 
-int main() {
-    std::cout << "=========================================================" << std::endl;
-    std::cout << "       VECTOR DB ENGINE BENCHMARK SUITE (C++20)          " << std::endl;
-    std::cout << "=========================================================\n" << std::endl;
+namespace {
 
+using Clock = std::chrono::steady_clock;
+
+struct Stats {
+    double avg_ms{};
+    double p50_ms{};
+    double p95_ms{};
+    double p99_ms{};
+    double min_ms{};
+    double max_ms{};
+};
+
+Stats summarize(std::vector<double> samples) {
+    std::sort(samples.begin(), samples.end());
+    const auto pct = [&](double p) {
+        const size_t idx = std::min(
+            samples.size() - 1,
+            static_cast<size_t>(std::ceil(p * samples.size())) - 1);
+        return samples[idx];
+    };
+
+    Stats s;
+    s.avg_ms = std::accumulate(samples.begin(), samples.end(), 0.0) / samples.size();
+    s.p50_ms = pct(0.50);
+    s.p95_ms = pct(0.95);
+    s.p99_ms = pct(0.99);
+    s.min_ms = samples.front();
+    s.max_ms = samples.back();
+    return s;
+}
+
+template <typename Fn>
+double time_ms(Fn&& fn) {
+    const auto start = Clock::now();
+    fn();
+    const auto end = Clock::now();
+    return std::chrono::duration<double, std::milli>(end - start).count();
+}
+
+} // namespace
+
+int main(int argc, char** argv) {
     constexpr size_t DIM = 128;
-    constexpr size_t NUM_RECORDS = 5000;
+    const size_t DATASET_SIZE = (argc > 1 && std::string(argv[1]) == "--large") ? 500'000 : 100'000;
+    constexpr size_t NUM_QUERIES = 100;
+    constexpr size_t K = 10;
+    constexpr uint32_t NUM_CATEGORIES = 5;
+
     const std::string db_file = "benchmark_engine.db";
+    std::error_code ec;
+    std::filesystem::remove(db_file, ec);
 
     std::mt19937 rng(1337);
-    std::uniform_real_distribution<float> dist(0.0f, 1.0f);
-    std::uniform_int_distribution<uint32_t> category_dist(1, 5);
+    std::uniform_real_distribution<float> value_dist(0.0f, 1.0f);
+    std::uniform_int_distribution<uint32_t> category_dist(0, NUM_CATEGORIES - 1);
 
-    // 1. Math Layer SIMD Benchmark
-    std::cout << "[1/3] Benchmarking Math Layer (AVX2 SIMD vs Scalar)..." << std::endl;
-    std::vector<float> vec_a(DIM), vec_b(DIM);
+    std::cout << "============================================================\n";
+    std::cout << "             VECTOR DB ENGINE BENCHMARK SUITE\n";
+    std::cout << "============================================================\n\n";
+    std::cout << "Dataset: " << DATASET_SIZE << " vectors x " << DIM
+              << "D FP32 | K=" << K << " | Queries=" << NUM_QUERIES << "\n\n";
+
+    // ------------------------------------------------------------
+    // 1. Math benchmark: scalar vs AVX2/FMA
+    // ------------------------------------------------------------
+    std::cout << "[1/4] Distance Layer Benchmark\n";
+
+    std::vector<float> a(DIM), b(DIM);
     for (size_t i = 0; i < DIM; ++i) {
-        vec_a[i] = dist(rng);
-        vec_b[i] = dist(rng);
+        a[i] = value_dist(rng);
+        b[i] = value_dist(rng);
     }
 
-    constexpr size_t MATH_ITERATIONS = 500000;
-    auto start_math = std::chrono::high_resolution_clock::now();
-    for (size_t i = 0; i < MATH_ITERATIONS; ++i) {
-        volatile float d = math::calculate_cosine_distance(vec_a.data(), vec_b.data(), DIM);
-    }
-    auto end_math = std::chrono::high_resolution_clock::now();
-    std::chrono::duration<double, std::milli> math_duration = end_math - start_math;
-    std::cout << " -> Computed " << MATH_ITERATIONS << " Cosine Distances in: " 
-              << math_duration.count() << " ms (" 
-              << (MATH_ITERATIONS / (math_duration.count() / 1000.0)) / 1e6 << " M ops/sec)\n" << std::endl;
+    constexpr size_t MATH_ITERATIONS = 500'000;
+    volatile float sink = 0.0f;
 
-    // 2. Storage & Index Insertion Benchmark
-    std::cout << "[2/3] Benchmarking Storage & Dual-Index Ingestion (" << NUM_RECORDS << " records)..." << std::endl;
-    storage::BufferPoolManager bpm(db_file, 100);
+    const double scalar_ms = time_ms([&] {
+        for (size_t i = 0; i < MATH_ITERATIONS; ++i) {
+            sink += math::cosine_distance_cpu(a.data(), b.data(), DIM);
+        }
+    });
+
+    const double simd_ms = time_ms([&] {
+        for (size_t i = 0; i < MATH_ITERATIONS; ++i) {
+            sink += math::cosine_distance_avx2(a.data(), b.data(), DIM);
+        }
+    });
+
+    std::cout << "  Scalar cosine : " << scalar_ms << " ms\n";
+    std::cout << "  AVX2/FMA      : " << simd_ms << " ms\n";
+    std::cout << "  SIMD speedup  : " << scalar_ms / simd_ms << "x\n";
+    std::cout << "  Throughput     : "
+              << (MATH_ITERATIONS / (simd_ms / 1000.0)) / 1e6
+              << " M distance ops/sec\n\n";
+
+    // ------------------------------------------------------------
+    // 2. Build dataset + storage/index ingestion
+    // ------------------------------------------------------------
+    std::cout << "[2/4] Ingestion Benchmark\n";
+    storage::BufferPoolManager bpm(db_file, 1000);
     query::ExecutionEngine engine(bpm, DIM);
 
-    auto start_ingest = std::chrono::high_resolution_clock::now();
-    for (size_t i = 0; i < NUM_RECORDS; ++i) {
+    // Deterministic, evenly distributed categories. This is important:
+    // every category has real candidates, so filtered benchmarks don't
+    // accidentally measure the zero-candidate fast path.
+    std::vector<std::vector<float>> queries(NUM_QUERIES, std::vector<float>(DIM));
+    std::vector<uint32_t> query_categories(NUM_QUERIES);
+
+    for (auto& q : queries) {
+        for (float& x : q) x = value_dist(rng);
+    }
+    for (auto& c : query_categories) c = category_dist(rng);
+
+    const double ingest_ms = time_ms([&] {
         std::vector<float> vec(DIM);
-        for (size_t d_idx = 0; d_idx < DIM; ++d_idx) vec[d_idx] = dist(rng);
-        uint32_t category = category_dist(rng);
-        engine.insert_record(static_cast<uint32_t>(i), category, vec);
+        for (size_t i = 0; i < DATASET_SIZE; ++i) {
+            for (float& x : vec) x = value_dist(rng);
+            const uint32_t category = static_cast<uint32_t>(i % NUM_CATEGORIES);
+            engine.insert_record(static_cast<uint32_t>(i), category, vec);
+        }
+    });
+
+    std::cout << "  Records       : " << DATASET_SIZE << "\n";
+    std::cout << "  Time           : " << ingest_ms << " ms\n";
+    std::cout << "  Throughput     : "
+              << DATASET_SIZE / (ingest_ms / 1000.0)
+              << " records/sec\n\n";
+
+    // ------------------------------------------------------------
+    // 3. Warm-up + hybrid filtered retrieval
+    // ------------------------------------------------------------
+    std::cout << "[3/4] Hybrid Exact Filtered Top-K Benchmark\n";
+    std::cout << "  Category distribution: 5 categories, ~"
+              << DATASET_SIZE / NUM_CATEGORIES << " candidates/category\n";
+
+    // Warm up code paths and caches. Warm-up samples are not timed.
+    for (size_t i = 0; i < 10; ++i) {
+        auto warm = engine.hybrid_query(query_categories[i], queries[i], K);
+        if (warm.size() != K) {
+            std::cerr << "ERROR: warm-up returned " << warm.size()
+                      << " results instead of " << K << "\n";
+            return 1;
+        }
     }
-    auto end_ingest = std::chrono::high_resolution_clock::now();
-    std::chrono::duration<double, std::milli> ingest_duration = end_ingest - start_ingest;
-    std::cout << " -> Ingested " << NUM_RECORDS << " vectors in: " 
-              << ingest_duration.count() << " ms ("
-              << (NUM_RECORDS / (ingest_duration.count() / 1000.0)) << " Records/sec)\n" << std::endl;
 
-    // 3. Hybrid Query Latency Benchmark (p95 / p99)
-    std::cout << "[3/3] Benchmarking Hybrid Query Latency (Top-10 retrieval with Category Filter)..." << std::endl;
-    constexpr size_t NUM_QUERIES = 200;
-    std::vector<double> latencies_ms;
+    std::vector<double> latencies;
+    latencies.reserve(NUM_QUERIES);
+    size_t total_results = 0;
 
-    for (size_t q = 0; q < NUM_QUERIES; ++q) {
-        std::vector<float> query_vec(DIM);
-        for (size_t d_idx = 0; d_idx < DIM; ++d_idx) query_vec[d_idx] = dist(rng);
-        uint32_t target_category = category_dist(rng);
+    for (size_t i = 0; i < NUM_QUERIES; ++i) {
+        const double ms = time_ms([&] {
+            auto results = engine.hybrid_query(
+                query_categories[i], queries[i], K);
+            total_results += results.size();
 
-        auto start_q = std::chrono::high_resolution_clock::now();
-        auto results = engine.hybrid_query(target_category, query_vec, 10);
-        auto end_q = std::chrono::high_resolution_clock::now();
-
-        std::chrono::duration<double, std::milli> q_dur = end_q - start_q;
-        latencies_ms.push_back(q_dur.count());
+            if (results.size() != K) {
+                std::cerr << "ERROR: query returned " << results.size()
+                          << " results instead of " << K << "\n";
+            }
+        });
+        latencies.push_back(ms);
     }
 
-    std::sort(latencies_ms.begin(), latencies_ms.end());
-    double avg_lat = std::accumulate(latencies_ms.begin(), latencies_ms.end(), 0.0) / NUM_QUERIES;
-    double p95_lat = latencies_ms[static_cast<size_t>(NUM_QUERIES * 0.95)];
-    double p99_lat = latencies_ms[static_cast<size_t>(NUM_QUERIES * 0.99)];
+    const Stats filtered = summarize(latencies);
+    std::cout << std::fixed << std::setprecision(4);
+    std::cout << "  Avg latency   : " << filtered.avg_ms << " ms\n";
+    std::cout << "  p50 latency   : " << filtered.p50_ms << " ms\n";
+    std::cout << "  p95 latency   : " << filtered.p95_ms << " ms\n";
+    std::cout << "  p99 latency   : " << filtered.p99_ms << " ms\n";
+    std::cout << "  Min / Max     : " << filtered.min_ms << " / "
+              << filtered.max_ms << " ms\n";
+    std::cout << "  Results/query : "
+              << static_cast<double>(total_results) / NUM_QUERIES << "\n\n";
 
-    std::cout << " -> Avg Query Latency: " << avg_lat << " ms" << std::endl;
-    std::cout << " -> p95 Query Latency: " << p95_lat << " ms" << std::endl;
-    std::cout << " -> p99 Query Latency: " << p99_lat << " ms" << std::endl;
-    std::cout << "\n=========================================================" << std::endl;
+    // ------------------------------------------------------------
+    // 4. Empty-filter correctness/fast-path benchmark
+    // ------------------------------------------------------------
+    std::cout << "[4/4] Empty Filter Fast-Path Benchmark\n";
+    const uint32_t missing_category = NUM_CATEGORIES + 100;
+    std::vector<double> empty_latencies;
+    empty_latencies.reserve(NUM_QUERIES);
 
+    for (size_t i = 0; i < NUM_QUERIES; ++i) {
+        const double ms = time_ms([&] {
+            auto results = engine.hybrid_query(
+                missing_category, queries[i], K);
+            if (!results.empty()) {
+                std::cerr << "ERROR: missing category returned results\n";
+            }
+        });
+        empty_latencies.push_back(ms);
+    }
+
+    const Stats empty = summarize(empty_latencies);
+    std::cout << "  Avg latency   : " << empty.avg_ms << " ms\n";
+    std::cout << "  p95 latency   : " << empty.p95_ms << " ms\n";
+    std::cout << "  p99 latency   : " << empty.p99_ms << " ms\n";
+
+    std::cout << "\n============================================================\n";
+    std::cout << "Notes:\n";
+    std::cout << "  * Filtered search is exact over the B+ tree candidate set.\n";
+    std::cout << "  * Top-K uses a bounded heap, not a full sort.\n";
+    std::cout << "  * Empty-filter latency is reported separately and is NOT\n";
+    std::cout << "    presented as vector-retrieval latency.\n";
+    std::cout << "============================================================\n";
+
+    (void)sink;
     return 0;
 }
