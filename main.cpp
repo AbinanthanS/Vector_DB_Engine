@@ -1,31 +1,39 @@
 #include <iostream>
 #include <vector>
 #include "storage/buffer_pool.h"
-#include "index/btree.h"
+#include "index/hnsw.h"
 
 int main() {
-    const std::string db_file = "btree_test.db";
+    const std::string db_file = "hnsw_test.db";
     storage::BufferPoolManager bpm(db_file, 10);
-    index::BTreeIndex btree(bpm);
 
-    // Insert scalar metadata mapping to dummy record IDs
-    index::RecordID rid1{1, 0};
-    index::RecordID rid2{2, 1};
-    index::RecordID rid3{3, 2};
+    constexpr size_t DIM = 128;
+    index::HNSWIndex hnsw(bpm, DIM);
 
-    btree.insert(100, rid1);
-    btree.insert(200, rid2);
-    btree.insert(300, rid3);
+    // Insert 3 target vectors
+    std::vector<float> vec0(DIM, 0.1f); // Node 0
+    std::vector<float> vec1(DIM, 0.5f); // Node 1 (Closest to query)
+    std::vector<float> vec2(DIM, 0.9f); // Node 2
 
-    std::cout << "[B+Tree] Inserted scalar keys (100, 200, 300) into disk pages." << std::endl;
+    index::RecordID rid0{1, 0};
+    index::RecordID rid1{1, 1};
+    index::RecordID rid2{1, 2};
 
-    // Query key 200
-    std::vector<index::RecordID> results;
-    if (btree.search(200, results)) {
-        std::cout << "[B+Tree Search] Key 200 Found -> Page ID: " 
-                  << results[0].page_id << ", Slot ID: " << results[0].slot_id << std::endl;
-    } else {
-        std::cerr << "[B+Tree Search] Key 200 Not Found!" << std::endl;
+    hnsw.insert(0, vec0, rid0);
+    hnsw.insert(1, vec1, rid1);
+    hnsw.insert(2, vec2, rid2);
+
+    std::cout << "[HNSW] Inserted 3 vectors (128-dim) into spatial graph." << std::endl;
+
+    // Search query vector closest to vec1 (0.5f)
+    std::vector<float> query_vec(DIM, 0.52f);
+    auto results = hnsw.search(query_vec, 2); // Retrieve Top-2 nearest neighbors
+
+    std::cout << "[HNSW Search] Top-2 Nearest Neighbors for Query:" << std::endl;
+    for (size_t i = 0; i < results.size(); ++i) {
+        std::cout << " Rank " << i + 1 << " -> Cosine Distance: " << results[i].first
+                  << " | Page ID: " << results[i].second.page_id 
+                  << ", Slot ID: " << results[i].second.slot_id << std::endl;
     }
 
     return 0;
