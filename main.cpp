@@ -1,26 +1,45 @@
 #include <iostream>
 #include <vector>
-#include "storage/page.h"
+#include "storage/buffer_pool.h"
 
 int main() {
-    storage::SlottedPage page;
+    const std::string db_filename = "vector_engine_test.db";
+    
+    // Step 1: Initialize Buffer Pool & Create persistent data page
+    uint32_t target_page_id = 0;
+    int32_t target_slot_id = -1;
 
-    // Create dummy 128-dim float vector payload
-    std::vector<float> original_vector(128, 0.42f);
-    uint16_t payload_bytes = original_vector.size() * sizeof(float);
+    {
+        storage::BufferPoolManager bpm(db_filename, 10);
+        target_page_id = bpm.new_page();
 
-    // Insert into page
-    int32_t slot_id = page.insert_record(reinterpret_cast<const uint8_t*>(original_vector.data()), payload_bytes);
-    std::cout << "Inserted 128-dim vector into Slot ID: " << slot_id << std::endl;
-    std::cout << "Remaining page free space: " << page.get_free_space() << " bytes" << std::endl;
+        storage::SlottedPage* page = bpm.fetch_page(target_page_id);
+        
+        std::vector<float> sample_vector = {1.1f, 2.2f, 3.3f, 4.4f, 5.5f};
+        uint16_t bytes = sample_vector.size() * sizeof(float);
 
-    // Read back from page
-    std::vector<uint8_t> read_buffer;
-    if (page.get_record(slot_id, read_buffer)) {
-        const float* read_floats = reinterpret_cast<const float*>(read_buffer.data());
-        std::cout << "Successfully retrieved vector. First element value: " << read_floats[0] << std::endl;
-    } else {
-        std::cerr << "Failed to read record!" << std::endl;
+        target_slot_id = page->insert_record(reinterpret_cast<const uint8_t*>(sample_vector.data()), bytes);
+        bpm.unpin_page(target_page_id, true);
+        bpm.flush_page(target_page_id);
+
+        std::cout << "[Write] Flushed Page ID: " << target_page_id 
+                  << " with Slot ID: " << target_slot_id << " to " << db_filename << std::endl;
+    } // BufferPoolManager closes handle here
+
+    // Step 2: Re-open file with new BufferPool instance and verify disk page persistence
+    {
+        storage::BufferPoolManager bpm(db_filename, 10);
+        storage::SlottedPage* page = bpm.fetch_page(target_page_id);
+
+        std::vector<uint8_t> read_bytes;
+        if (page->get_record(target_slot_id, read_bytes)) {
+            const float* float_data = reinterpret_cast<const float*>(read_bytes.data());
+            std::cout << "[Read] Reloaded page from disk successfully!" << std::endl;
+            std::cout << "Values read: " << float_data[0] << ", " << float_data[1] << ", " 
+                      << float_data[2] << ", " << float_data[3] << ", " << float_data[4] << std::endl;
+        } else {
+            std::cerr << "Failed to deserialize vector record from disk page!" << std::endl;
+        }
     }
 
     return 0;
