@@ -1,0 +1,5 @@
+build/
+docker_test_build/
+*.db
+.git/
+.gitignore
