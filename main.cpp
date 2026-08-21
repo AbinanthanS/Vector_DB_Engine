@@ -1,24 +1,27 @@
 #include <iostream>
 #include <vector>
-#include <chrono>
-#include "math/distance.h"
+#include "storage/page.h"
 
 int main() {
-    constexpr size_t DIM = 128;
-    constexpr size_t ITERATIONS = 100000;
+    storage::SlottedPage page;
 
-    std::vector<float> vec_a(DIM, 0.5f);
-    std::vector<float> vec_b(DIM, 0.3f);
+    // Create dummy 128-dim float vector payload
+    std::vector<float> original_vector(128, 0.42f);
+    uint16_t payload_bytes = original_vector.size() * sizeof(float);
 
-    auto start = std::chrono::high_resolution_clock::now();
-    for (size_t i = 0; i < ITERATIONS; ++i) {
-        volatile float dist = math::calculate_cosine_distance(vec_a.data(), vec_b.data(), DIM);
+    // Insert into page
+    int32_t slot_id = page.insert_record(reinterpret_cast<const uint8_t*>(original_vector.data()), payload_bytes);
+    std::cout << "Inserted 128-dim vector into Slot ID: " << slot_id << std::endl;
+    std::cout << "Remaining page free space: " << page.get_free_space() << " bytes" << std::endl;
+
+    // Read back from page
+    std::vector<uint8_t> read_buffer;
+    if (page.get_record(slot_id, read_buffer)) {
+        const float* read_floats = reinterpret_cast<const float*>(read_buffer.data());
+        std::cout << "Successfully retrieved vector. First element value: " << read_floats[0] << std::endl;
+    } else {
+        std::cerr << "Failed to read record!" << std::endl;
     }
-    auto end = std::chrono::high_resolution_clock::now();
-
-    std::chrono::duration<double, std::milli> duration = end - start;
-    std::cout << "Executed " << ITERATIONS << " 128-dim Cosine operations in: " 
-              << duration.count() << " ms" << std::endl;
 
     return 0;
 }
