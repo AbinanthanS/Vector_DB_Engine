@@ -10,6 +10,12 @@ includes:
 - scalar and AVX2/FMA cosine-distance implementations
 - an exact filtered top-k query path over B+ tree candidates
 
+The HNSW index uses an `ef_construction`-bounded best-first search while
+building each layer. New nodes connect to multiple candidates with
+bidirectional neighbor links, pruning the weakest edge when a neighbor reaches
+capacity. Query-time layer search uses a widened candidate pool before
+returning the requested top-k results.
+
 ## Requirements
 
 - CMake 3.20 or newer
@@ -129,8 +135,9 @@ guarantee.
 
 The filtered search is exact over the B+ tree candidate set. Top-k selection
 uses a bounded heap rather than sorting every candidate. The benchmark does
-not measure concurrent clients, durability under failure, recall against an
-exact unfiltered ground truth, or a production-scale workload.
+not measure concurrent clients, durability under failure, or a production-scale
+workload. HNSW recall is checked separately by the moderate-graph unit test
+against brute-force results.
 
 ## Tests
 
@@ -139,8 +146,8 @@ ctest --test-dir build --output-on-failure
 ```
 
 The test suite covers slotted-page operations, buffer-pool allocation and
-flushing, B+ tree lookups and splits, distance calculations, HNSW search, and
-query-engine filtering.
+flushing, B+ tree lookups and splits, scalar/SIMD distance calculations, HNSW
+search and recall, and query-engine filtering.
 
 ## Project Layout
 
