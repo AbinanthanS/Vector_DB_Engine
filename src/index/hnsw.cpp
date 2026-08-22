@@ -25,6 +25,56 @@ float HNSWIndex::get_distance(const std::vector<float>& a, uint32_t node_b_id) {
     return math::calculate_cosine_distance(a.data(), vec_b, dim_);
 }
 
+float HNSWIndex::get_distance_nodes(uint32_t node_a_id, uint32_t node_b_id) {
+    const float* vec_a = vector_cache_.data() + static_cast<size_t>(node_a_id) * dim_;
+    const float* vec_b = vector_cache_.data() + static_cast<size_t>(node_b_id) * dim_;
+    return math::calculate_cosine_distance(vec_a, vec_b, dim_);
+}
+
+std::vector<std::pair<float, uint32_t>> HNSWIndex::search_layer(
+    const std::vector<float>& query, uint32_t entry_point, size_t ef, int level) {
+    using DistPair = std::pair<float, uint32_t>;
+
+    std::unordered_set<uint32_t> visited;
+    std::priority_queue<DistPair, std::vector<DistPair>, std::greater<DistPair>> candidates;
+    std::priority_queue<DistPair, std::vector<DistPair>, std::less<DistPair>> best;
+
+    float d0 = get_distance(query, entry_point);
+    candidates.push({d0, entry_point});
+    best.push({d0, entry_point});
+    visited.insert(entry_point);
+
+    while (!candidates.empty()) {
+        auto [cur_dist, cur_id] = candidates.top();
+        candidates.pop();
+
+        if (best.size() >= ef && cur_dist > best.top().first) break;
+
+        const auto& node = node_cache_[cur_id];
+        for (uint16_t i = 0; i < node.num_neighbors[level]; ++i) {
+            uint32_t neighbor_id = node.neighbors[level][i];
+            if (visited.count(neighbor_id)) continue;
+            visited.insert(neighbor_id);
+
+            float d = get_distance(query, neighbor_id);
+            if (best.size() < ef || d < best.top().first) {
+                candidates.push({d, neighbor_id});
+                best.push({d, neighbor_id});
+                if (best.size() > ef) best.pop();
+            }
+        }
+    }
+
+    std::vector<DistPair> out;
+    out.reserve(best.size());
+    while (!best.empty()) {
+        out.push_back(best.top());
+        best.pop();
+    }
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
 void HNSWIndex::insert(uint32_t node_id, const std::vector<float>& vec, RecordID rid) {
     const size_t required = (static_cast<size_t>(node_id) + 1) * dim_;
     if (vector_cache_.size() < required) vector_cache_.resize(required);
@@ -70,13 +120,40 @@ void HNSWIndex::insert(uint32_t node_id, const std::vector<float>& vec, RecordID
         }
     }
 
-    // Connect neighbors from insert_level down to level 0
+    // Connect neighbors from insert_level down to level 0.
     for (int level = std::min(insert_level, max_level_); level >= 0; --level) {
-        auto& entry = node_cache_[curr_obj];
-        if (entry.num_neighbors[level] < MAX_NEIGHBORS) {
-            entry.neighbors[level][entry.num_neighbors[level]++] = node_id;
-            new_node.neighbors[level][new_node.num_neighbors[level]++] = curr_obj;
+        std::vector<std::pair<float, uint32_t>> candidates =
+            search_layer(vec, curr_obj, ef_construction_, level);
+
+        size_t m = std::min(candidates.size(), MAX_NEIGHBORS);
+        for (size_t i = 0; i < m; ++i) {
+            uint32_t neighbor_id = candidates[i].second;
+
+            if (new_node.num_neighbors[level] < MAX_NEIGHBORS) {
+                new_node.neighbors[level][new_node.num_neighbors[level]++] = neighbor_id;
+            }
+
+            auto& nb_entry = node_cache_[neighbor_id];
+            if (nb_entry.num_neighbors[level] < MAX_NEIGHBORS) {
+                nb_entry.neighbors[level][nb_entry.num_neighbors[level]++] = node_id;
+            } else {
+                float new_dist = get_distance_nodes(neighbor_id, node_id);
+                uint16_t worst_idx = 0;
+                float worst_dist = get_distance_nodes(neighbor_id, nb_entry.neighbors[level][0]);
+                for (uint16_t j = 1; j < nb_entry.num_neighbors[level]; ++j) {
+                    float dj = get_distance_nodes(neighbor_id, nb_entry.neighbors[level][j]);
+                    if (dj > worst_dist) {
+                        worst_dist = dj;
+                        worst_idx = j;
+                    }
+                }
+                if (new_dist < worst_dist) {
+                    nb_entry.neighbors[level][worst_idx] = node_id;
+                }
+            }
         }
+
+        if (!candidates.empty()) curr_obj = candidates.front().second;
     }
 
     node_cache_[node_id] = new_node;
@@ -112,31 +189,15 @@ std::vector<std::pair<float, RecordID>> HNSWIndex::search(const std::vector<floa
         }
     }
 
-    // Best-first search on Layer 0
-    using DistPair = std::pair<float, uint32_t>;
-    std::priority_queue<DistPair, std::vector<DistPair>, std::greater<DistPair>> visited_queue;
-    std::unordered_set<uint32_t> visited;
+    size_t ef_search = std::max(k, ef_construction_);
+    std::vector<std::pair<float, uint32_t>> candidates =
+        search_layer(query_vec, curr_obj, ef_search, 0);
 
-    visited_queue.push({curr_dist, curr_obj});
-    visited.insert(curr_obj);
-
-    while (!visited_queue.empty() && results.size() < k) {
-        auto [dist, node_id] = visited_queue.top();
-        visited_queue.pop();
-
-        results.push_back({dist, node_cache_[node_id].record_id});
-
-        const auto& node = node_cache_[node_id];
-        for (uint16_t i = 0; i < node.num_neighbors[0]; ++i) {
-            uint32_t neighbor_id = node.neighbors[0][i];
-            if (visited.find(neighbor_id) == visited.end()) {
-                visited.insert(neighbor_id);
-                float d = get_distance(query_vec, neighbor_id);
-                visited_queue.push({d, neighbor_id});
-            }
-        }
+    size_t n = std::min(k, candidates.size());
+    results.reserve(n);
+    for (size_t i = 0; i < n; ++i) {
+        results.push_back({candidates[i].first, node_cache_[candidates[i].second].record_id});
     }
-
     return results;
 }
 

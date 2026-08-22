@@ -47,16 +47,11 @@ TEST_F(HNSWTest, SingleInsertedVectorIsFoundByItself) {
     EXPECT_NEAR(results[0].first, 0.0f, 1e-4f);
 }
 
-TEST_F(HNSWTest, SearchRecallAgainstBruteForceOnSmallGraph) {
-    // NOTE: this graph is intentionally small. HNSWIndex::insert() connects
-    // each new node to only a single neighbor per level (it never uses
-    // ef_construction to consider multiple candidates), so recall vs. brute
-    // force degrades sharply as the graph grows -- measured recall@10 drops
-    // from ~0.8 at N=50 to effectively 0 by N=5000. This test pins down
-    // today's actual behavior on a small graph; it is not a claim that the
-    // index has good recall at production scale. See engineering notes.
+TEST_F(HNSWTest, SearchRecallAgainstBruteForceOnModerateGraph) {
+    // insert() now uses an ef_construction-bounded layer search and connects
+    // each new node to multiple candidates instead of a single greedy edge.
     constexpr size_t dim = 16;
-    constexpr int N = 50;
+    constexpr int N = 500;
     constexpr size_t K = 10;
 
     vdb_index::HNSWIndex hnsw(*bpm_, dim, /*ef_construction=*/128);
@@ -96,7 +91,8 @@ TEST_F(HNSWTest, SearchRecallAgainstBruteForceOnSmallGraph) {
         if (ground_truth_ids.count(static_cast<int>(rid.page_id))) ++hits;
     }
     EXPECT_GE(hits, static_cast<int>(K) / 2)
-        << "expected at least half of the top-" << K << " results to match brute force";
+        << "expected at least half of the top-" << K << " results to match brute force "
+        << "(fixed insert() should give much better recall than the old single-edge version)";
 }
 
 TEST_F(HNSWTest, SearchFilteredOnlyReturnsCandidatesFromAllowList) {

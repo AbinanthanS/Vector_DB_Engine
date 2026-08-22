@@ -54,6 +54,9 @@ private:
 
     int generate_random_level();
     float get_distance(const std::vector<float>& a, uint32_t node_b_id);
+    float get_distance_nodes(uint32_t node_a_id, uint32_t node_b_id);
+    std::vector<std::pair<float, uint32_t>> search_layer(
+        const std::vector<float>& query, uint32_t entry_point, size_t ef, int level);
     static uint64_t rid_key(RecordID rid);
 };
 
