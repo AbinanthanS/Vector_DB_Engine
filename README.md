@@ -121,17 +121,17 @@ guarantee.
 | Metric | Result |
 | --- | ---: |
 | Dataset | 100,000 vectors x 128D FP32 |
-| Scalar cosine | 74.9413 ms / 500,000 ops |
-| AVX2/FMA cosine | 16.2498 ms / 500,000 ops |
-| SIMD speedup | 4.61x |
-| SIMD throughput | 30.7696 M distance ops/sec |
-| Ingestion throughput | 118,795 records/sec |
-| Filtered top-k average | 8.7067 ms |
-| Filtered top-k p50 | 8.0771 ms |
-| Filtered top-k p95 | 14.6883 ms |
-| Filtered top-k p99 | 15.3577 ms |
+| Scalar cosine | 71.9717 ms / 500,000 ops |
+| AVX2/FMA cosine | 17.4164 ms / 500,000 ops |
+| SIMD speedup | 4.13241x |
+| SIMD throughput | 28.7086 M distance ops/sec |
+| Ingestion throughput | 4,194.36 records/sec |
+| Filtered top-k average | 7.5554 ms |
+| Filtered top-k p50 | 7.5160 ms |
+| Filtered top-k p95 | 8.1880 ms |
+| Filtered top-k p99 | 9.0779 ms |
 | Filtered results/query | 10 |
-| Empty-category average | 0.0014 ms |
+| Empty-category average | 0.0005 ms |
 
 The filtered search is exact over the B+ tree candidate set. Top-k selection
 uses a bounded heap rather than sorting every candidate. The benchmark does
