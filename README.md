@@ -161,6 +161,3 @@ math/          Distance-related headers retained for the project layout
 query/         Query-engine headers retained for the project layout
 storage/       Storage headers retained for the project layout
 ```
-
-This project is intended for experimentation and performance profiling rather
-than production deployment.
